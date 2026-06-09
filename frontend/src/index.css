@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --surface: #141414;
+  --surface-raised: #1c1c1c;
+  --border: #2a2a2a;
+  --accent: #6366f1;
+  --accent-muted: rgba(99, 102, 241, 0.15);
+  --foreground: #e8e8e8;
+  --muted-fg: #666666;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Normalize select element appearance to match the dark theme */
+select {
+  color-scheme: dark;
+}
+
+/* Remove default focus ring in favor of explicit focus styles */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
