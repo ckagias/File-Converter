@@ -4,8 +4,6 @@ import logging
 import subprocess
 import tarfile
 import zipfile
-from pathlib import Path
-
 import cairosvg
 import ffmpeg
 import py7zr

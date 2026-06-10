@@ -32,7 +32,6 @@ services:
     volumes:
       - uploads_data:/app/uploads
       - outputs_data:/app/outputs
-      - db_data:/app/db
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,5 +70,4 @@ services:
 volumes:
   uploads_data:
   outputs_data:
-  db_data:
   postgres_data:

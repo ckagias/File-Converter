@@ -3,13 +3,10 @@ uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 celery[redis]
-redis
 python-multipart
 pydantic
 pydantic-settings
 pdf2docx
-python-docx
-python-pptx
 openpyxl
 Pillow
 PyPDF2
