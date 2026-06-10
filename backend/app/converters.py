@@ -4,6 +4,8 @@ import logging
 import subprocess
 import tarfile
 import zipfile
+from pathlib import Path
+
 import cairosvg
 import ffmpeg
 import py7zr
@@ -125,7 +127,7 @@ def _libreoffice_convert(input_path: Path, target_ext: str, output_dir: Path) ->
         return False, ""
 
 
-# ── Document converters ──────────────────────────────────────────────────────
+# Document converters
 
 def _convert_docx(stored: str, target_ext: str) -> tuple[bool, str]:
     try:
@@ -256,7 +258,7 @@ def _convert_xlsx_to_csv(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# ── Image converters ─────────────────────────────────────────────────────────
+# Image converters
 
 def _pil_save_fmt(ext: str) -> str:
     return {"jpg": "JPEG", "jpeg": "JPEG", "tiff": "TIFF"}.get(ext, ext.upper())
@@ -301,7 +303,7 @@ def _convert_svg(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# ── Audio converters ─────────────────────────────────────────────────────────
+# Audio converters
 
 _PYDUB_FORMAT = {
     "mp3": "mp3", "wav": "wav", "ogg": "ogg",
@@ -324,7 +326,7 @@ def _convert_audio(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# ── Video converters ─────────────────────────────────────────────────────────
+# Video converters 
 
 def _convert_video(stored: str, target_ext: str) -> tuple[bool, str]:
     try:
@@ -344,7 +346,7 @@ def _convert_video(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# ── Archive converters ────────────────────────────────────────────────────────
+# Archive converters
 
 def _repack_zip_to_7z(stored: str, target_ext: str) -> tuple[bool, str]:
     try:
@@ -419,13 +421,13 @@ def _repack_targz_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# Helpers
 
 def _cleanup(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-# ── Dispatcher ────────────────────────────────────────────────────────────────
+# Dispatcher
 
 def handle_conversion(stored_filename: str, target_format: str) -> tuple[bool, str]:
     src_ext = stored_filename.rsplit(".", 1)[-1].lower() if "." in stored_filename else ""
