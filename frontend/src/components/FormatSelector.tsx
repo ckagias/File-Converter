@@ -1,11 +1,4 @@
-const STYLES = {
-  root: "flex items-center gap-3",
-  label: "text-xs font-medium text-[var(--muted-fg)] uppercase tracking-wider mb-1",
-  selectGroup: "flex flex-col",
-  select:
-    "bg-[var(--surface-raised)] border border-[var(--border)] text-[var(--foreground)] text-sm rounded-md px-3 py-2 focus:outline-none focus:border-[var(--accent)] cursor-pointer transition-colors min-w-[120px]",
-  arrow: "text-[var(--muted-fg)] text-lg font-light select-none mt-5",
-};
+import { HiChevronUpDown } from "react-icons/hi2";
 
 interface Props {
   formats: Record<string, string[]>;
@@ -15,56 +8,94 @@ interface Props {
   onTargetChange: (target: string) => void;
 }
 
-export default function FormatSelector({
-  formats,
-  source,
-  target,
-  onSourceChange,
-  onTargetChange,
-}: Props) {
+export default function FormatSelector({ formats, source, target, onSourceChange, onTargetChange }: Props) {
   const sourceOptions = Object.keys(formats);
   const targetOptions = formats[source] ?? [];
 
-  function handleSourceChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    onSourceChange(e.target.value);
-  }
-
   return (
-    <div className={STYLES.root}>
-      <div className={STYLES.selectGroup}>
-        <span className={STYLES.label}>From</span>
-        <select
-          className={STYLES.select}
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <label htmlFor="source-format" style={{ fontSize: "12px", color: "var(--cf-muted)", letterSpacing: "0.03em" }}>
+        Convert file
+      </label>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <SelectField
+          id="source-format"
           value={source}
-          onChange={handleSourceChange}
-          aria-label="Source format"
-        >
-          {sourceOptions.map((fmt) => (
-            <option key={fmt} value={fmt}>
-              {fmt.toUpperCase()}
-            </option>
-          ))}
-        </select>
-      </div>
+          options={sourceOptions}
+          onChange={onSourceChange}
+          ariaLabel="Source format"
+        />
 
-      <span className={STYLES.arrow}>→</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0, color: "var(--cf-muted)" }}>
+          <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
 
-      <div className={STYLES.selectGroup}>
-        <span className={STYLES.label}>To</span>
-        <select
-          className={STYLES.select}
+        <SelectField
           value={target}
-          onChange={(e) => onTargetChange(e.target.value)}
-          aria-label="Target format"
+          options={targetOptions}
+          onChange={onTargetChange}
+          ariaLabel="Target format"
           disabled={targetOptions.length === 0}
-        >
-          {targetOptions.map((fmt) => (
-            <option key={fmt} value={fmt}>
-              {fmt.toUpperCase()}
-            </option>
-          ))}
-        </select>
+        />
       </div>
+    </div>
+  );
+}
+
+function SelectField({
+  id,
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  disabled,
+}: {
+  id?: string;
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <select
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={ariaLabel}
+        disabled={disabled}
+        style={{
+          appearance: "none",
+          WebkitAppearance: "none",
+          background: "var(--cf-surface)",
+          border: "0.5px solid var(--cf-border)",
+          color: "var(--cf-text)",
+          fontSize: "13px",
+          fontFamily: "inherit",
+          fontWeight: 500,
+          borderRadius: "8px",
+          padding: "7px 32px 7px 10px",
+          cursor: disabled ? "not-allowed" : "pointer",
+          minWidth: "100px",
+          transition: "border-color 0.15s",
+          outline: "none",
+          opacity: disabled ? 0.4 : 1,
+        }}
+        onFocus={(e) => { e.currentTarget.style.borderColor = "var(--cf-accent)"; }}
+        onBlur={(e) => { e.currentTarget.style.borderColor = "var(--cf-border)"; }}
+      >
+        {options.map((fmt) => (
+          <option key={fmt} value={fmt}>{fmt.toLowerCase()}</option>
+        ))}
+      </select>
+      <HiChevronUpDown
+        size={14}
+        style={{
+          position: "absolute", right: 9, pointerEvents: "none",
+          color: "var(--cf-muted)", flexShrink: 0,
+        }}
+      />
     </div>
   );
 }

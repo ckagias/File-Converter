@@ -1,22 +1,14 @@
 import { useRef, useState } from "react";
-
-const STYLES = {
-  zone: "relative border-2 border-dashed border-[var(--border)] rounded-lg p-10 text-center cursor-pointer transition-colors",
-  zoneDragging: "border-[var(--accent)] bg-[var(--accent-muted)]",
-  zoneIdle: "hover:border-[var(--accent)] hover:bg-[var(--surface-raised)]",
-  hiddenInput: "hidden",
-  icon: "text-[var(--muted-fg)] text-3xl mb-3 select-none",
-  heading: "text-sm font-medium text-[var(--foreground)] mb-1",
-  sub: "text-xs text-[var(--muted-fg)]",
-  hint: "mt-3 text-xs text-[var(--muted-fg)] font-mono",
-};
+import { FiUploadCloud } from "react-icons/fi";
 
 interface Props {
   onFiles: (files: File[]) => void;
   accept: string;
+  formats: Record<string, string[]>;
+  source: string;
 }
 
-export default function DropZone({ onFiles, accept }: Props) {
+export default function DropZone({ onFiles, accept, formats, source }: Props) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -33,14 +25,7 @@ export default function DropZone({ onFiles, accept }: Props) {
   }
 
   function handleDragLeave(e: React.DragEvent) {
-    /* only clear when leaving the zone entirely */
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setDragging(false);
-    }
-  }
-
-  function handleClick() {
-    inputRef.current?.click();
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false);
   }
 
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -49,38 +34,68 @@ export default function DropZone({ onFiles, accept }: Props) {
     e.target.value = "";
   }
 
-  const zoneClass = [STYLES.zone, dragging ? STYLES.zoneDragging : STYLES.zoneIdle].join(" ");
+  const targetFormats = formats[source] ?? [];
 
   return (
     <div
-      className={zoneClass}
+      onClick={() => inputRef.current?.click()}
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
-      onClick={handleClick}
       role="button"
       aria-label="Upload files"
       tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") handleClick();
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") inputRef.current?.click(); }}
+      style={{
+        border: `0.5px dashed ${dragging ? "var(--cf-accent)" : "var(--cf-border)"}`,
+        borderRadius: "12px",
+        padding: "56px 32px",
+        textAlign: "center",
+        cursor: "pointer",
+        background: dragging ? "color-mix(in srgb, var(--cf-accent) 6%, transparent)" : "transparent",
+        transition: "border-color 0.15s, background 0.15s",
+        userSelect: "none",
       }}
     >
       <input
         ref={inputRef}
         type="file"
-        multiple
         accept={accept}
-        className={STYLES.hiddenInput}
+        style={{ display: "none" }}
         onChange={handleInputChange}
         tabIndex={-1}
       />
-      <div className={STYLES.icon}>↑</div>
-      <p className={STYLES.heading}>Drop files here or click to browse</p>
-      <p className={STYLES.sub}>Multiple files supported</p>
-      {accept && (
-        <p className={STYLES.hint}>
-          Accepted: {accept.split(",").map((s) => s.trim()).join(", ")}
-        </p>
+
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: "16px" }}>
+        <FiUploadCloud size={36} style={{ color: "var(--cf-muted)" }} />
+      </div>
+
+      <p style={{ fontSize: "16px", fontWeight: 500, color: "var(--cf-text)", marginBottom: "8px" }}>
+        Drop files here or click to browse
+      </p>
+      <p style={{ fontSize: "13px", color: "var(--cf-muted)", marginBottom: "22px" }}>
+        Max 50 MB
+      </p>
+
+      {targetFormats.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", justifyContent: "center" }}>
+          {targetFormats.map((fmt) => (
+            <span
+              key={fmt}
+              style={{
+                fontSize: "11px",
+                fontWeight: 500,
+                color: "var(--cf-muted)",
+                border: "0.5px solid var(--cf-border)",
+                borderRadius: "5px",
+                padding: "2px 7px",
+                letterSpacing: "0.03em",
+              }}
+            >
+              .{fmt}
+            </span>
+          ))}
+        </div>
       )}
     </div>
   );

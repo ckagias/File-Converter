@@ -1,5 +1,10 @@
+import { ThemeProvider } from "./theme";
 import Dashboard from "./components/Dashboard";
 
 export default function App() {
-  return <Dashboard />;
+  return (
+    <ThemeProvider>
+      <Dashboard />
+    </ThemeProvider>
+  );
 }
