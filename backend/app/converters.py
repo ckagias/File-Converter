@@ -1,8 +1,8 @@
 import csv
 import io
+import logging
 import subprocess
 import tarfile
-import traceback
 import zipfile
 from pathlib import Path
 
@@ -16,8 +16,12 @@ from pydub import AudioSegment
 import openpyxl
 import PyPDF2
 
-UPLOAD_DIR = Path("/app/uploads")
-OUTPUT_DIR = Path("/app/outputs")
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+UPLOAD_DIR = settings.upload_dir
+OUTPUT_DIR = settings.output_dir
 
 SUPPORTED_CONVERSIONS: dict[str, list[str]] = {
     # documents
@@ -59,9 +63,49 @@ _AUDIO_EXTS = {"mp3", "wav", "ogg", "flac", "aac", "m4a"}
 _VIDEO_EXTS = {"mp4", "mkv", "avi", "mov", "webm"}
 _ARCHIVE_EXTS = {"zip", "7z", "gz", "tar.gz"}
 
+# Category size limits used by the upload endpoint
+CATEGORY_SIZE_LIMITS_MB: dict[str, int] = {
+    "image":    50,
+    "document": 100,
+    "audio":    200,
+    "video":    2000,
+    "archive":  500,
+}
+
+EXT_CATEGORY: dict[str, str] = {
+    "jpg": "image", "jpeg": "image", "png": "image", "webp": "image",
+    "bmp": "image", "tiff": "image", "svg": "image", "ico": "image",
+    "pdf": "document", "docx": "document", "pptx": "document",
+    "xlsx": "document", "odt": "document", "txt": "document",
+    "mp3": "audio", "wav": "audio", "ogg": "audio",
+    "flac": "audio", "aac": "audio", "m4a": "audio",
+    "mp4": "video", "mkv": "video", "avi": "video", "mov": "video", "webm": "video",
+    "zip": "archive", "7z": "archive", "gz": "archive",
+}
+
 
 def _output_name(stored: str, ext: str) -> str:
     return stored.rsplit(".", 1)[0] + "." + ext.lstrip(".")
+
+
+def _libreoffice_to_pdf(input_path: Path) -> tuple[bool, str]:
+    """Convert any LibreOffice-supported file to PDF and return (ok, output_name)."""
+    try:
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf",
+             "--outdir", str(OUTPUT_DIR), str(input_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            logger.error("LibreOffice stderr: %s", result.stderr)
+            return False, ""
+        output_path = OUTPUT_DIR / (input_path.stem + ".pdf")
+        if not output_path.exists():
+            return False, ""
+        return True, output_path.name
+    except Exception:
+        logger.exception("LibreOffice conversion failed for %s", input_path)
+        return False, ""
 
 
 def _libreoffice_convert(input_path: Path, target_ext: str, output_dir: Path) -> tuple[bool, str]:
@@ -69,17 +113,17 @@ def _libreoffice_convert(input_path: Path, target_ext: str, output_dir: Path) ->
         result = subprocess.run(
             ["libreoffice", "--headless", "--convert-to", target_ext,
              "--outdir", str(output_dir), str(input_path)],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
-            print(result.stderr)
+            logger.error("LibreOffice stderr: %s", result.stderr)
             return False, ""
         output_path = output_dir / (input_path.stem + "." + target_ext)
         if not output_path.exists():
             return False, ""
         return True, output_path.name
     except Exception:
-        traceback.print_exc()
+        logger.exception("LibreOffice conversion failed for %s", input_path)
         return False, ""
 
 
@@ -93,16 +137,32 @@ def _convert_docx(stored: str, target_ext: str) -> tuple[bool, str]:
         ok, lo_name = _libreoffice_convert(input_path, target_ext, OUTPUT_DIR)
         if not ok:
             return False, ""
-        # LibreOffice may name the file differently; rename to our convention
         lo_path = OUTPUT_DIR / lo_name
         if lo_path != out_path:
             lo_path.rename(out_path)
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        out_path = OUTPUT_DIR / _output_name(stored, target_ext)
-        if out_path.exists():
-            out_path.unlink()
+        logger.exception("docx conversion failed: %s -> %s", stored, target_ext)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
+        return False, ""
+
+
+def _convert_via_libreoffice_to_pdf(stored: str) -> tuple[bool, str]:
+    """Generic handler for docx/pptx/xlsx/odt -> pdf via LibreOffice."""
+    try:
+        input_path = UPLOAD_DIR / stored
+        out_name = _output_name(stored, "pdf")
+        out_path = OUTPUT_DIR / out_name
+        ok, lo_name = _libreoffice_to_pdf(input_path)
+        if not ok:
+            return False, ""
+        lo_path = OUTPUT_DIR / lo_name
+        if lo_path != out_path:
+            lo_path.rename(out_path)
+        return True, out_name
+    except Exception:
+        logger.exception("LibreOffice->pdf failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "pdf"))
         return False, ""
 
 
@@ -116,10 +176,8 @@ def _convert_pdf_to_docx(stored: str, target_ext: str) -> tuple[bool, str]:
         cv.close()
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        out_path = OUTPUT_DIR / _output_name(stored, "docx")
-        if out_path.exists():
-            out_path.unlink()
+        logger.exception("pdf->docx failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "docx"))
         return False, ""
 
 
@@ -129,16 +187,12 @@ def _convert_pdf_to_txt(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, "txt")
         out_path = OUTPUT_DIR / out_name
         reader = PyPDF2.PdfReader(str(input_path))
-        text = "\n".join(
-            page.extract_text() or "" for page in reader.pages
-        )
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
         out_path.write_text(text, encoding="utf-8")
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        out_path = OUTPUT_DIR / _output_name(stored, "txt")
-        if out_path.exists():
-            out_path.unlink()
+        logger.exception("pdf->txt failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "txt"))
         return False, ""
 
 
@@ -149,8 +203,7 @@ def _convert_pdf_to_image(stored: str, target_ext: str) -> tuple[bool, str]:
         pil_fmt = "JPEG" if target_ext in ("jpg", "jpeg") else target_ext.upper()
         if len(pages) == 1:
             out_name = _output_name(stored, target_ext)
-            out_path = OUTPUT_DIR / out_name
-            pages[0].save(str(out_path), pil_fmt)
+            pages[0].save(str(OUTPUT_DIR / out_name), pil_fmt)
             return True, out_name
         # multi-page: pack into zip
         zip_name = _output_name(stored, "zip")
@@ -162,43 +215,19 @@ def _convert_pdf_to_image(stored: str, target_ext: str) -> tuple[bool, str]:
                 zf.writestr(f"page_{i + 1:04d}.{target_ext}", buf.getvalue())
         return True, zip_name
     except Exception:
-        traceback.print_exc()
+        logger.exception("pdf->image failed: %s -> %s", stored, target_ext)
         for ext in (target_ext, "zip"):
-            p = OUTPUT_DIR / _output_name(stored, ext)
-            if p.exists():
-                p.unlink()
-        return False, ""
-
-
-def _convert_pptx_to_pdf(stored: str, target_ext: str) -> tuple[bool, str]:
-    try:
-        input_path = UPLOAD_DIR / stored
-        out_name = _output_name(stored, "pdf")
-        ok, lo_name = _libreoffice_convert(input_path, "pdf", OUTPUT_DIR)
-        if not ok:
-            return False, ""
-        lo_path = OUTPUT_DIR / lo_name
-        out_path = OUTPUT_DIR / out_name
-        if lo_path != out_path:
-            lo_path.rename(out_path)
-        return True, out_name
-    except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "pdf")
-        if p.exists():
-            p.unlink()
+            _cleanup(OUTPUT_DIR / _output_name(stored, ext))
         return False, ""
 
 
 def _convert_pptx_to_image(stored: str, target_ext: str) -> tuple[bool, str]:
-    # convert to pdf first, then pdf to image
     try:
         input_path = UPLOAD_DIR / stored
-        ok, pdf_name = _libreoffice_convert(input_path, "pdf", OUTPUT_DIR)
+        ok, pdf_name = _libreoffice_to_pdf(input_path)
         if not ok:
             return False, ""
-        # reuse pdf-to-image handler treating the intermediate pdf as uploaded
-        # copy pdf to uploads temporarily
+        # reuse pdf-to-image handler: copy intermediate pdf to uploads temporarily
         tmp_stored = pdf_name
         (UPLOAD_DIR / tmp_stored).write_bytes((OUTPUT_DIR / pdf_name).read_bytes())
         ok2, out_name = _convert_pdf_to_image(tmp_stored, target_ext)
@@ -206,27 +235,7 @@ def _convert_pptx_to_image(stored: str, target_ext: str) -> tuple[bool, str]:
         (OUTPUT_DIR / pdf_name).unlink(missing_ok=True)
         return ok2, out_name
     except Exception:
-        traceback.print_exc()
-        return False, ""
-
-
-def _convert_xlsx_to_pdf(stored: str, target_ext: str) -> tuple[bool, str]:
-    try:
-        input_path = UPLOAD_DIR / stored
-        out_name = _output_name(stored, "pdf")
-        ok, lo_name = _libreoffice_convert(input_path, "pdf", OUTPUT_DIR)
-        if not ok:
-            return False, ""
-        lo_path = OUTPUT_DIR / lo_name
-        out_path = OUTPUT_DIR / out_name
-        if lo_path != out_path:
-            lo_path.rename(out_path)
-        return True, out_name
-    except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "pdf")
-        if p.exists():
-            p.unlink()
+        logger.exception("pptx->image failed: %s -> %s", stored, target_ext)
         return False, ""
 
 
@@ -244,38 +253,15 @@ def _convert_xlsx_to_csv(stored: str, target_ext: str) -> tuple[bool, str]:
         wb.close()
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "csv")
-        if p.exists():
-            p.unlink()
-        return False, ""
-
-
-def _convert_odt_to_pdf(stored: str, target_ext: str) -> tuple[bool, str]:
-    try:
-        input_path = UPLOAD_DIR / stored
-        out_name = _output_name(stored, "pdf")
-        ok, lo_name = _libreoffice_convert(input_path, "pdf", OUTPUT_DIR)
-        if not ok:
-            return False, ""
-        lo_path = OUTPUT_DIR / lo_name
-        out_path = OUTPUT_DIR / out_name
-        if lo_path != out_path:
-            lo_path.rename(out_path)
-        return True, out_name
-    except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "pdf")
-        if p.exists():
-            p.unlink()
+        logger.exception("xlsx->csv failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "csv"))
         return False, ""
 
 
 # ── Image converters ─────────────────────────────────────────────────────────
 
 def _pil_save_fmt(ext: str) -> str:
-    mapping = {"jpg": "JPEG", "jpeg": "JPEG", "tiff": "TIFF"}
-    return mapping.get(ext, ext.upper())
+    return {"jpg": "JPEG", "jpeg": "JPEG", "tiff": "TIFF"}.get(ext, ext.upper())
 
 
 def _convert_image(stored: str, target_ext: str) -> tuple[bool, str]:
@@ -284,7 +270,6 @@ def _convert_image(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, target_ext)
         out_path = OUTPUT_DIR / out_name
         img = Image.open(str(input_path))
-        # JPEG doesn't support alpha
         if target_ext in ("jpg", "jpeg") and img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGB")
         if target_ext == "pdf":
@@ -295,10 +280,8 @@ def _convert_image(stored: str, target_ext: str) -> tuple[bool, str]:
             img.save(str(out_path), _pil_save_fmt(target_ext))
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, target_ext)
-        if p.exists():
-            p.unlink()
+        logger.exception("image conversion failed: %s -> %s", stored, target_ext)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
         return False, ""
 
 
@@ -315,10 +298,8 @@ def _convert_svg(stored: str, target_ext: str) -> tuple[bool, str]:
             img.save(str(out_path), _pil_save_fmt(target_ext))
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, target_ext)
-        if p.exists():
-            p.unlink()
+        logger.exception("svg conversion failed: %s -> %s", stored, target_ext)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
         return False, ""
 
 
@@ -340,10 +321,8 @@ def _convert_audio(stored: str, target_ext: str) -> tuple[bool, str]:
         audio.export(str(out_path), format=_PYDUB_FORMAT.get(target_ext, target_ext))
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, target_ext)
-        if p.exists():
-            p.unlink()
+        logger.exception("audio conversion failed: %s -> %s", stored, target_ext)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
         return False, ""
 
 
@@ -354,29 +333,16 @@ def _convert_video(stored: str, target_ext: str) -> tuple[bool, str]:
         input_path = UPLOAD_DIR / stored
         out_name = _output_name(stored, target_ext)
         out_path = OUTPUT_DIR / out_name
+        stream = ffmpeg.input(str(input_path))
         if target_ext == "mp3":
-            # extract audio only
-            (
-                ffmpeg
-                .input(str(input_path))
-                .output(str(out_path), acodec="libmp3lame", vn=None)
-                .overwrite_output()
-                .run(quiet=True)
-            )
+            stream = stream.output(str(out_path), acodec="libmp3lame", vn=None)
         else:
-            (
-                ffmpeg
-                .input(str(input_path))
-                .output(str(out_path))
-                .overwrite_output()
-                .run(quiet=True)
-            )
+            stream = stream.output(str(out_path))
+        stream.overwrite_output().run(quiet=True)
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, target_ext)
-        if p.exists():
-            p.unlink()
+        logger.exception("video conversion failed: %s -> %s", stored, target_ext)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
         return False, ""
 
 
@@ -394,10 +360,8 @@ def _repack_zip_to_7z(stored: str, target_ext: str) -> tuple[bool, str]:
                         sz.writef(f, item.filename)
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "7z")
-        if p.exists():
-            p.unlink()
+        logger.exception("zip->7z failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "7z"))
         return False, ""
 
 
@@ -416,10 +380,8 @@ def _repack_zip_to_targz(stored: str, target_ext: str) -> tuple[bool, str]:
                         tf.addfile(info, io.BytesIO(data))
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "tar.gz")
-        if p.exists():
-            p.unlink()
+        logger.exception("zip->tar.gz failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "tar.gz"))
         return False, ""
 
 
@@ -435,10 +397,8 @@ def _repack_7z_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
                 zf.writestr(name, buf.read())
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "zip")
-        if p.exists():
-            p.unlink()
+        logger.exception("7z->zip failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "zip"))
         return False, ""
 
 
@@ -456,11 +416,15 @@ def _repack_targz_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
                             zf.writestr(member.name, f.read())
         return True, out_name
     except Exception:
-        traceback.print_exc()
-        p = OUTPUT_DIR / _output_name(stored, "zip")
-        if p.exists():
-            p.unlink()
+        logger.exception("tar.gz->zip failed: %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, "zip"))
         return False, ""
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _cleanup(path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -469,7 +433,6 @@ def handle_conversion(stored_filename: str, target_format: str) -> tuple[bool, s
     src_ext = stored_filename.rsplit(".", 1)[-1].lower() if "." in stored_filename else ""
     tgt = target_format.lower().lstrip(".")
 
-    # documents
     if src_ext == "docx":
         return _convert_docx(stored_filename, tgt)
     if src_ext == "pdf":
@@ -481,32 +444,28 @@ def handle_conversion(stored_filename: str, target_format: str) -> tuple[bool, s
             return _convert_pdf_to_image(stored_filename, tgt)
     if src_ext == "pptx":
         if tgt == "pdf":
-            return _convert_pptx_to_pdf(stored_filename, tgt)
+            return _convert_via_libreoffice_to_pdf(stored_filename)
         if tgt in ("jpg", "jpeg", "png"):
             return _convert_pptx_to_image(stored_filename, tgt)
     if src_ext == "xlsx":
         if tgt == "pdf":
-            return _convert_xlsx_to_pdf(stored_filename, tgt)
+            return _convert_via_libreoffice_to_pdf(stored_filename)
         if tgt == "csv":
             return _convert_xlsx_to_csv(stored_filename, tgt)
     if src_ext == "odt":
-        return _convert_odt_to_pdf(stored_filename, tgt)
+        return _convert_via_libreoffice_to_pdf(stored_filename)
 
-    # images
     if src_ext == "svg":
         return _convert_svg(stored_filename, tgt)
     if src_ext in _IMAGE_EXTS:
         return _convert_image(stored_filename, tgt)
 
-    # audio
     if src_ext in _AUDIO_EXTS:
         return _convert_audio(stored_filename, tgt)
 
-    # video
     if src_ext in _VIDEO_EXTS:
         return _convert_video(stored_filename, tgt)
 
-    # archives
     if src_ext == "zip":
         if tgt == "7z":
             return _repack_zip_to_7z(stored_filename, tgt)
@@ -517,5 +476,5 @@ def handle_conversion(stored_filename: str, target_format: str) -> tuple[bool, s
     if src_ext == "gz":
         return _repack_targz_to_zip(stored_filename, tgt)
 
-    print(f"No handler for {src_ext} -> {tgt}")
+    logger.warning("No handler for %s -> %s", src_ext, tgt)
     return False, ""

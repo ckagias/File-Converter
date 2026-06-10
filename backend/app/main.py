@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Generator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.converters import SUPPORTED_CONVERSIONS
+from app.converters import (
+    CATEGORY_SIZE_LIMITS_MB,
+    EXT_CATEGORY,
+    SUPPORTED_CONVERSIONS,
+)
 from app.models import Base, Job, SessionLocal, engine
 
-UPLOAD_DIR = Path("/app/uploads")
-OUTPUT_DIR = Path("/app/outputs")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="File Converter")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.output_dir.mkdir(parents=True, exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="File Converter", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,9 +38,22 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    Base.metadata.create_all(bind=engine)
+class JobResponse(BaseModel):
+    id: int
+    original_filename: str
+    source_format: str
+    target_format: str
+    status: str
+    output_filename: str | None
+    file_size: int
+    error_message: str | None
+    created_at: str
+
+
+class JobStatusResponse(BaseModel):
+    status: str
+    output_filename: str | None
+    error_message: str | None
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -42,24 +64,11 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-_CATEGORY_SIZE_LIMITS_MB = {
-    "image":    50,
-    "document": 100,
-    "audio":    200,
-    "video":    2000,
-    "archive":  500,
-}
-
-_EXT_CATEGORY = {
-    "jpg": "image", "jpeg": "image", "png": "image", "webp": "image",
-    "bmp": "image", "tiff": "image", "svg": "image", "ico": "image",
-    "pdf": "document", "docx": "document", "pptx": "document",
-    "xlsx": "document", "odt": "document", "txt": "document",
-    "mp3": "audio", "wav": "audio", "ogg": "audio",
-    "flac": "audio", "aac": "audio", "m4a": "audio",
-    "mp4": "video", "mkv": "video", "avi": "video", "mov": "video", "webm": "video",
-    "zip": "archive", "7z": "archive", "gz": "archive",
-}
+def _get_job_or_404(db: Session, job_id: int) -> Job:
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/formats")
@@ -67,12 +76,12 @@ def get_formats() -> dict:
     return SUPPORTED_CONVERSIONS
 
 
-@app.post("/files/upload", status_code=status.HTTP_201_CREATED)
+@app.post("/files/upload", status_code=status.HTTP_201_CREATED, response_model=JobResponse)
 async def upload_file(
     file: UploadFile,
     target_format: str = Query(...),
     db: Session = Depends(get_db),
-) -> dict:
+) -> JobResponse:
     from app.tasks import convert_file
 
     original_name = file.filename or "upload"
@@ -87,16 +96,16 @@ async def upload_file(
     data = await file.read()
     file_size = len(data)
 
-    category = _EXT_CATEGORY.get(src_ext, "document")
-    limit_bytes = _CATEGORY_SIZE_LIMITS_MB.get(category, settings.max_file_size_mb) * 1024 * 1024
+    category = EXT_CATEGORY.get(src_ext, "document")
+    limit_bytes = CATEGORY_SIZE_LIMITS_MB.get(category, settings.max_file_size_mb) * 1024 * 1024
     if file_size > limit_bytes:
         raise HTTPException(
             status_code=413,
-            detail=f"File too large. Max size for {category} is {_CATEGORY_SIZE_LIMITS_MB.get(category)} MB",
+            detail=f"File too large. Max size for {category} is {CATEGORY_SIZE_LIMITS_MB.get(category)} MB",
         )
 
     stored_name = f"{uuid.uuid4()}.{src_ext}"
-    (UPLOAD_DIR / stored_name).write_bytes(data)
+    (settings.upload_dir / stored_name).write_bytes(data)
 
     job = Job(
         original_filename=original_name,
@@ -115,23 +124,27 @@ async def upload_file(
     db.commit()
     db.refresh(job)
 
-    return {
-        "id": job.id,
-        "original_filename": job.original_filename,
-        "source_format": job.source_format,
-        "target_format": job.target_format,
-        "status": job.status,
-        "output_filename": job.output_filename,
-        "file_size": job.file_size,
-        "error_message": job.error_message,
-        "created_at": job.created_at.isoformat(),
-    }
+    return JobResponse(
+        id=job.id,
+        original_filename=job.original_filename,
+        source_format=job.source_format,
+        target_format=job.target_format,
+        status=job.status,
+        output_filename=job.output_filename,
+        file_size=job.file_size,
+        error_message=job.error_message,
+        created_at=job.created_at.isoformat(),
+    )
 
 
-@app.get("/files/{job_id}/status")
-def job_status(job_id: int, db: Session = Depends(get_db)) -> dict:
+@app.get("/files/{job_id}/status", response_model=JobStatusResponse)
+def job_status(job_id: int, db: Session = Depends(get_db)) -> JobStatusResponse:
     job = _get_job_or_404(db, job_id)
-    return {"status": job.status, "output_filename": job.output_filename}
+    return JobStatusResponse(
+        status=job.status,
+        output_filename=job.output_filename,
+        error_message=job.error_message,
+    )
 
 
 @app.get("/files/{job_id}/download")
@@ -139,16 +152,14 @@ def download_file(job_id: int, db: Session = Depends(get_db)) -> Response:
     job = _get_job_or_404(db, job_id)
     if job.status != "done" or not job.output_filename:
         raise HTTPException(status_code=400, detail="File not ready")
-    path = OUTPUT_DIR / job.output_filename
+    path = settings.output_dir / job.output_filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="Output file not found on disk")
 
-    # read into memory so we can delete before responding
     filename = job.output_filename
     data = path.read_bytes()
 
-    # clean up everything — files and job record
-    (UPLOAD_DIR / job.stored_filename).unlink(missing_ok=True)
+    (settings.upload_dir / job.stored_filename).unlink(missing_ok=True)
     path.unlink(missing_ok=True)
     db.delete(job)
     db.commit()
@@ -163,10 +174,3 @@ def download_file(job_id: int, db: Session = Depends(get_db)) -> Response:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
-
-
-def _get_job_or_404(db: Session, job_id: int) -> Job:
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job

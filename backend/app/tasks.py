@@ -29,7 +29,7 @@ def convert_file(self, job_id: int) -> None:
             job.output_filename = output_filename
         else:
             job.status = "error"
-            job.error_message = "Conversion failed"
+            job.error_message = f"Conversion from {job.source_format} to {job.target_format} failed"
         db.commit()
 
     except Exception as exc:
