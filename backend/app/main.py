@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
+import aiofiles
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -93,19 +95,36 @@ async def upload_file(
     if tgt not in SUPPORTED_CONVERSIONS.get(src_ext, []):
         raise HTTPException(status_code=400, detail=f"Cannot convert {src_ext} to {tgt}")
 
-    data = await file.read()
-    file_size = len(data)
-
     category = EXT_CATEGORY.get(src_ext, "document")
-    limit_bytes = CATEGORY_SIZE_LIMITS_MB.get(category, settings.max_file_size_mb) * 1024 * 1024
-    if file_size > limit_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max size for {category} is {CATEGORY_SIZE_LIMITS_MB.get(category)} MB",
-        )
+    limit_mb = CATEGORY_SIZE_LIMITS_MB.get(category, settings.max_file_size_mb)
+    limit_bytes = limit_mb * 1024 * 1024
 
     stored_name = f"{uuid.uuid4()}.{src_ext}"
-    (settings.upload_dir / stored_name).write_bytes(data)
+    dest = settings.upload_dir / stored_name
+
+    # Stream the upload to disk in 1 MB chunks so we never hold the full file
+    # in memory — critical for 2 GB video uploads.
+    file_size = 0
+    try:
+        async with aiofiles.open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > limit_bytes:
+                    await f.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Max size for {category} is {limit_mb} MB",
+                    )
+                await f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Failed to save uploaded file") from exc
 
     job = Job(
         original_filename=original_name,
@@ -147,27 +166,45 @@ def job_status(job_id: int, db: Session = Depends(get_db)) -> JobStatusResponse:
     )
 
 
+def _delete_job_files(job_id: int, upload_path: Path, output_path: Path) -> None:
+    """Background task: delete files and DB record after download completes."""
+    upload_path.unlink(missing_ok=True)
+    output_path.unlink(missing_ok=True)
+    with SessionLocal() as db:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job:
+            db.delete(job)
+            db.commit()
+
+
 @app.get("/files/{job_id}/download")
-def download_file(job_id: int, db: Session = Depends(get_db)) -> Response:
+def download_file(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> FileResponse:
     job = _get_job_or_404(db, job_id)
     if job.status != "done" or not job.output_filename:
         raise HTTPException(status_code=400, detail="File not ready")
-    path = settings.output_dir / job.output_filename
-    if not path.exists():
+
+    output_path = settings.output_dir / job.output_filename
+    if not output_path.exists():
         raise HTTPException(status_code=404, detail="Output file not found on disk")
 
-    filename = job.output_filename
-    data = path.read_bytes()
+    upload_path = settings.upload_dir / job.stored_filename
 
-    (settings.upload_dir / job.stored_filename).unlink(missing_ok=True)
-    path.unlink(missing_ok=True)
-    db.delete(job)
-    db.commit()
+    # Use the original filename (not the UUID stored name) as the download name.
+    stem = Path(job.original_filename).stem
+    download_name = f"{stem}.{job.target_format}"
 
-    return Response(
-        content=data,
+    # Schedule file + DB cleanup to run after the response is fully sent.
+    # FileResponse streams directly from disk — no file is loaded into memory.
+    background_tasks.add_task(_delete_job_files, job.id, upload_path, output_path)
+
+    return FileResponse(
+        path=output_path,
+        filename=download_name,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

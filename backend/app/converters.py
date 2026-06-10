@@ -326,20 +326,33 @@ def _convert_audio(stored: str, target_ext: str) -> tuple[bool, str]:
         return False, ""
 
 
-# Video converters 
+# Video converters
 
 def _convert_video(stored: str, target_ext: str) -> tuple[bool, str]:
     try:
         input_path = UPLOAD_DIR / stored
         out_name = _output_name(stored, target_ext)
         out_path = OUTPUT_DIR / out_name
+
         stream = ffmpeg.input(str(input_path))
         if target_ext == "mp3":
             stream = stream.output(str(out_path), acodec="libmp3lame", vn=None)
         else:
             stream = stream.output(str(out_path))
-        stream.overwrite_output().run(quiet=True)
+
+        # ffmpeg-python's .run() has no timeout parameter, so compile the
+        # argument list and hand it to subprocess where we can set one.
+        # 30 min matches the Celery task_time_limit.
+        args = stream.overwrite_output().compile()
+        result = subprocess.run(args, timeout=1800, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode(errors="replace")[:512])
+
         return True, out_name
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg timed out for %s", stored)
+        _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))
+        return False, ""
     except Exception:
         logger.exception("video conversion failed: %s -> %s", stored, target_ext)
         _cleanup(OUTPUT_DIR / _output_name(stored, target_ext))

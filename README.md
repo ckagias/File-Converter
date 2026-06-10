@@ -1,14 +1,17 @@
 # File Converter
 
-A self-hosted file conversion service with user authentication, background processing, and support for documents, images, audio, video, and archives.
+A self-hosted, privacy-focused file conversion service. Upload a file, pick a target format, download the result. Files are deleted immediately after download — no accounts, no retention.
+
+Background processing via Celery + Redis handles large files without blocking the API. Streaming I/O ensures even 2 GB video uploads and downloads never load the full file into memory.
 
 ## Features
 
-- User authentication with JWT (register, login, 24-hour tokens)
 - Background file conversion via Celery + Redis
-- Per-user file isolation (UUID-prefixed storage, jobs scoped to owner)
+- Streaming upload and download — peak memory per file is ~1 MB regardless of size
 - Strict file size limits per category (images 50 MB, documents 100 MB, audio 200 MB, archives 500 MB, video 2 GB)
+- Automatic cleanup of unconverted and un-downloaded files (Celery Beat, every 30 min)
 - Support for documents, images, audio, video, and archives
+- Three UI themes (Steel, Forest, Ocean)
 - Docker Compose setup — one command to run
 
 ## Supported Formats
@@ -70,7 +73,7 @@ A self-hosted file conversion service with user authentication, background proce
 git clone <repo>
 cd file-converter
 cp .env.example .env
-# Edit .env and set a strong SECRET_KEY
+# Edit .env — set strong values for POSTGRES_PASSWORD
 docker compose up --build
 ```
 
@@ -82,7 +85,6 @@ All configuration is through environment variables. Copy `.env.example` to `.env
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SECRET_KEY` | JWT signing secret — use a long random string in production | `change-this-to-a-long-random-string` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://file-converter:file-converter@postgres:5432/file-converter` |
 | `REDIS_URL` | Redis connection string used by Celery | `redis://redis:6379/0` |
 | `POSTGRES_USER` | PostgreSQL username (used by the postgres container) | `file-converter` |
@@ -91,11 +93,19 @@ All configuration is through environment variables. Copy `.env.example` to `.env
 | `CORS_ORIGINS` | Comma-separated list of allowed CORS origins | `http://localhost:3000` |
 | `MAX_FILE_SIZE_MB` | Fallback file size limit in MB for uncategorised formats | `50` |
 
+## Resource tuning
+
+The worker container is capped at 6 GB RAM and 3 CPU cores by default, with `--concurrency=2` (two parallel conversions). Adjust in `docker-compose.yml` to match your host:
+
+- Each conversion slot needs up to ~3 GB RAM for a 2 GB video file.
+- Increase `--concurrency` only if you have enough RAM: `concurrency × 3 GB + 1 GB overhead`.
+- `worker_max_tasks_per_child=10` restarts each worker process every 10 tasks to reclaim memory leaked by LibreOffice and ffmpeg.
+
 ## Development
 
 Run each service independently without Docker.
 
-**Prerequisites:** Python 3.11+, Node 20+, a running Redis instance, a running PostgreSQL instance.
+**Prerequisites:** Python 3.12+, Node 20+, a running Redis instance, a running PostgreSQL instance.
 
 ```bash
 # Redis
@@ -115,8 +125,10 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 
 # Celery worker (separate terminal, same backend/ directory)
-cd backend
-celery -A app.tasks worker --loglevel=info
+celery -A app.tasks worker --loglevel=info --concurrency=2
+
+# Celery Beat scheduler (separate terminal, same backend/ directory)
+celery -A app.tasks beat --loglevel=info
 
 # Frontend
 cd frontend
@@ -136,14 +148,16 @@ file-converter/
 │   │   ├── converters.py  # conversion handlers and SUPPORTED_CONVERSIONS map
 │   │   ├── main.py        # FastAPI app and all endpoints
 │   │   ├── models.py      # SQLAlchemy database models
-│   │   └── tasks.py       # Celery background tasks
+│   │   └── tasks.py       # Celery tasks (conversion + cleanup beat)
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
 │   │   ├── api.ts         # all API calls
-│   │   ├── App.tsx        # auth router (login / main view)
-│   │   └── components/    # UI components
+│   │   ├── App.tsx        # theme provider and root
+│   │   ├── theme.tsx      # Steel / Forest / Ocean palettes
+│   │   └── components/    # Dashboard, DropZone, FormatSelector
+│   ├── nginx.conf
 │   ├── Dockerfile
 │   └── package.json
 ├── docker-compose.yml
