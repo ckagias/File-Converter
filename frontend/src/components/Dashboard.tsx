@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { getFormats, uploadFile, downloadFile, type Job } from "../api";
 import { PALETTES, usePalette } from "../theme";
 import FormatSelector from "./FormatSelector";
@@ -113,6 +113,20 @@ function Toast({ message, onDismiss }: { message: string; onDismiss: () => void 
   );
 }
 
+// ── Error humanizer ───────────────────────────────────────────────────────────
+
+function humanizeError(raw: string): string {
+  if (!raw) return "Conversion failed. The file may be corrupted or an unsupported variant.";
+  const r = raw.toLowerCase();
+  if (r.includes("libreoffice")) return "Document conversion failed. File may be password-protected or corrupted.";
+  if (r.includes("ffmpeg") && r.includes("timed out")) return "Video conversion timed out. Try a smaller file or different format.";
+  if (r.includes("zip bomb")) return "Archive rejected: uncompressed size is too large.";
+  if (r.includes("timed out or worker crashed")) return "Server ran out of resources. Try again in a few minutes.";
+  if (r.includes("magic byte") || r.includes("file content does not match")) return "File content doesn't match the selected format. Check the file isn't renamed.";
+  if (r.includes("too large")) return raw;
+  return "Conversion failed. The file may be corrupted or an unsupported variant.";
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -122,7 +136,7 @@ export default function Dashboard() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const { currentIndex, setPalette } = usePalette();
-  const pollRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const abortRefs = useRef<Record<string, AbortController>>({});
 
   useEffect(() => {
     getFormats().then((fmts) => {
@@ -133,7 +147,7 @@ export default function Dashboard() {
       }
       setFormats(fmts);
     });
-    return () => { Object.values(pollRefs.current).forEach(clearInterval); };
+    return () => { Object.values(abortRefs.current).forEach((c) => c.abort()); };
   }, []);
 
   function handleSourceChange(s: string) {
@@ -142,43 +156,88 @@ export default function Dashboard() {
     setTarget((prev) => available.includes(prev) ? prev : (available[0] ?? ""));
   }
 
-  function stopPoll(id: string) {
-    if (pollRefs.current[id]) {
-      clearInterval(pollRefs.current[id]);
-      delete pollRefs.current[id];
-    }
-  }
-
   function updateEntry(id: string, patch: Partial<FileEntry>) {
     setEntries((prev) => prev.map((e) => e.id === id ? { ...e, ...patch } : e));
   }
 
-  async function processEntry(entry: FileEntry, targetFmt: string) {
-    try {
-      updateEntry(entry.id, { status: "uploading", progress: 10 });
-      const job = await uploadFile(entry.file, targetFmt);
-      updateEntry(entry.id, { job, status: "converting", progress: 30 });
+  const pollWithBackoff = useCallback((
+    entryId: string,
+    jobId: string,
+    signal: AbortSignal,
+    deadline: number,
+    delay = 1000,
+    pollProgress = 50,
+  ) => {
+    if (signal.aborted) return;
+    const POLL_MAX_DELAY = 15000;
+    const POLL_BACKOFF = 1.5;
+    const REQUEST_TIMEOUT = 8000;
 
-      pollRefs.current[entry.id] = setInterval(async () => {
-        try {
-          const res = await fetch(`/api/files/${job.id}/status`);
-          const data = await res.json() as { status: string; output_filename: string | null; error_message: string | null };
-          if (data.status === "done") {
-            stopPoll(entry.id);
-            updateEntry(entry.id, { status: "done", progress: 100, outputFilename: data.output_filename });
-          } else if (data.status === "error") {
-            stopPoll(entry.id);
-            updateEntry(entry.id, { status: "error", progress: 0, errorMessage: data.error_message ?? "Conversion failed" });
-          } else {
-            updateEntry(entry.id, { progress: Math.min(90, (pollRefs.current[entry.id] ? 60 : 30)) });
-          }
-        } catch {
-          stopPoll(entry.id);
-          updateEntry(entry.id, { status: "error", errorMessage: "Lost connection to server" });
+    const handle = setTimeout(async () => {
+      if (signal.aborted) return;
+
+      if (Date.now() > deadline) {
+        updateEntry(entryId, { status: "error", errorMessage: "Conversion timed out. Try a smaller file." });
+        return;
+      }
+
+      const reqController = new AbortController();
+      const reqTimeout = setTimeout(() => reqController.abort(), REQUEST_TIMEOUT);
+
+      try {
+        const res = await fetch(`/api/files/${jobId}/status`, { signal: reqController.signal });
+        clearTimeout(reqTimeout);
+        const data = await res.json() as { status: string; output_filename: string | null; error_message: string | null };
+
+        if (data.status === "done") {
+          updateEntry(entryId, { status: "done", progress: 100, outputFilename: data.output_filename });
+        } else if (data.status === "error") {
+          updateEntry(entryId, {
+            status: "error",
+            progress: 0,
+            errorMessage: humanizeError(data.error_message ?? ""),
+          });
+        } else {
+          const nextProgress = Math.min(95, pollProgress + 2);
+          updateEntry(entryId, { progress: nextProgress });
+          const nextDelay = Math.min(delay * POLL_BACKOFF, POLL_MAX_DELAY);
+          pollWithBackoff(entryId, jobId, signal, deadline, nextDelay, nextProgress);
         }
-      }, 2000);
+      } catch (err) {
+        clearTimeout(reqTimeout);
+        if (signal.aborted) return;
+        if (err instanceof DOMException && err.name === "AbortError") {
+          pollWithBackoff(entryId, jobId, signal, deadline, Math.min(delay * POLL_BACKOFF, POLL_MAX_DELAY), pollProgress);
+        } else {
+          updateEntry(entryId, { status: "error", errorMessage: "Lost connection to server" });
+        }
+      }
+    }, delay);
+
+    signal.addEventListener("abort", () => clearTimeout(handle));
+  }, []);
+
+  async function processEntry(entry: FileEntry, targetFmt: string) {
+    const controller = new AbortController();
+    abortRefs.current[entry.id] = controller;
+    const deadline = Date.now() + 30 * 60 * 1000;
+
+    try {
+      updateEntry(entry.id, { status: "uploading", progress: 0 });
+      const job = await uploadFile(
+        entry.file,
+        targetFmt,
+        (pct) => updateEntry(entry.id, { progress: pct * 0.5 }),
+        controller.signal,
+      );
+      updateEntry(entry.id, { job, status: "converting", progress: 50 });
+      pollWithBackoff(entry.id, job.id, controller.signal, deadline);
     } catch (err) {
-      updateEntry(entry.id, { status: "error", errorMessage: err instanceof Error ? err.message : "Upload failed" });
+      if (controller.signal.aborted) return;
+      updateEntry(entry.id, {
+        status: "error",
+        errorMessage: err instanceof Error ? humanizeError(err.message) : "Upload failed",
+      });
     }
   }
 
@@ -225,13 +284,16 @@ export default function Dashboard() {
   }
 
   function handleRetry(entry: FileEntry) {
-    updateEntry(entry.id, { status: "queued", progress: 0, errorMessage: null, job: null, outputFilename: null });
-    processEntry({ ...entry, status: "queued", progress: 0, errorMessage: null, job: null, outputFilename: null }, target);
+    abortRefs.current[entry.id]?.abort();
+    delete abortRefs.current[entry.id];
+    const fresh = { ...entry, status: "queued" as FileStatus, progress: 0, errorMessage: null, job: null, outputFilename: null };
+    updateEntry(entry.id, fresh);
+    processEntry(fresh, target);
   }
 
   function reset() {
-    Object.values(pollRefs.current).forEach(clearInterval);
-    pollRefs.current = {};
+    Object.values(abortRefs.current).forEach((c) => c.abort());
+    abortRefs.current = {};
     setEntries([]);
   }
 

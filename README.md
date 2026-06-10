@@ -1,28 +1,30 @@
 # File Converter
 
-A self-hosted, privacy-focused file conversion service. Upload a file, pick a target format, download the result. Files are deleted immediately after download — no accounts, no retention.
+A self-hosted, privacy-focused file conversion service. Upload a file, pick a target format, download the result. Files are deleted immediately after download. Νo accounts, no retention.
 
 Background processing via Celery + Redis handles large files without blocking the API. Streaming I/O ensures even 2 GB video uploads and downloads never load the full file into memory.
 
 ## Features
 
 - Background file conversion via Celery + Redis
-- Streaming upload and download — peak memory per file is ~1 MB regardless of size
+- Streaming upload and download (peak memory per file is ~1 MB regardless of size)
+- Real upload progress bar via XHR (no frozen UI on large files)
+- Exponential backoff polling (starts at 1s, caps at 15s, generates far fewer requests for long conversions)
 - Strict file size limits per category (images 50 MB, documents 100 MB, audio 200 MB, archives 500 MB, video 2 GB)
 - Automatic cleanup of unconverted and un-downloaded files (Celery Beat, every 30 min)
 - Support for documents, images, audio, video, and archives
 - Three UI themes (Steel, Forest, Ocean)
-- Docker Compose setup — one command to run
+- Docker Compose setup (one command to run)
 
 ## Security
 
-- **Magic byte validation** — file content is checked against known signatures before conversion; a `.pdf` renamed to `.docx` is rejected
-- **Zip Slip protection** — archive member paths are resolved and checked to stay inside the output directory before extraction
-- **ZIP bomb protection** — total uncompressed size is capped at 4 GB across all archive converters
-- **UUID job IDs** — job IDs are random UUIDs, not sequential integers, preventing enumeration of other users' files
-- **NGINX rate limiting** — uploads capped at 3/min, status polling at 30/min, all other API calls at 60/min per IP; returns 429 on excess
-- **Non-root containers** — backend and worker run as `appuser` (uid 1001) with all Linux capabilities dropped except `DAC_OVERRIDE`
-- **Safe Content-Disposition** — download filenames strip control characters and use RFC 5987 encoding for non-ASCII names, preventing HTTP header injection
+- **Magic byte validation:** file content is checked against known signatures before conversion; a `.pdf` renamed to `.docx` is rejected
+- **Zip Slip protection:** archive member paths are resolved and checked to stay inside the output directory before extraction
+- **ZIP bomb protection:** total uncompressed size is capped at 4 GB across all archive converters
+- **UUID job IDs:** job IDs are random UUIDs, not sequential integers, preventing enumeration of other users' files
+- **NGINX rate limiting:** uploads capped at 3/min, status polling at 30/min, all other API calls at 60/min per IP; returns 429 on excess
+- **Non-root containers:** backend and worker run as `appuser` (uid 1001) with all Linux capabilities dropped except `DAC_OVERRIDE`
+- **Safe Content-Disposition:** download filenames strip control characters and use RFC 5987 encoding for non-ASCII names, preventing HTTP header injection
 
 ## Supported Formats
 
@@ -176,4 +178,4 @@ file-converter/
 
 ## License
 
-MIT — see LICENSE
+MIT | [LICENSE](LICENSE)
