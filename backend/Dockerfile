@@ -12,4 +12,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY app/ ./app/
 
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --no-create-home appuser && \
+    mkdir -p /app/uploads /app/outputs && \
+    chown -R appuser:appgroup /app/uploads /app/outputs
+
+USER appuser
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

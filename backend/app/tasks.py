@@ -44,7 +44,7 @@ celery_app.conf.update(
 
 
 @celery_app.task(bind=True, max_retries=2)
-def convert_file(self, job_id: int) -> None:
+def convert_file(self, job_id: str) -> None:
     from app.models import Job, SessionLocal
     from app.converters import handle_conversion
 

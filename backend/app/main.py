@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Generator
+from urllib.parse import quote
 
 import aiofiles
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, UploadFile, status
@@ -41,7 +43,7 @@ app.add_middleware(
 
 
 class JobResponse(BaseModel):
-    id: int
+    id: str
     original_filename: str
     source_format: str
     target_format: str
@@ -58,6 +60,17 @@ class JobStatusResponse(BaseModel):
     error_message: str | None
 
 
+def _safe_content_disposition(filename: str) -> str:
+    """Return a Content-Disposition filename value safe from header injection."""
+    name = Path(filename).name
+    name = "".join(c for c in name if unicodedata.category(c)[0] != "C")
+    ascii_safe = name.encode("ascii", errors="ignore").decode()
+    encoded = quote(name, safe=" .-_~()")
+    if ascii_safe == name:
+        return f'attachment; filename="{ascii_safe}"'
+    return f"attachment; filename*=UTF-8''{encoded}"
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
@@ -66,7 +79,7 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def _get_job_or_404(db: Session, job_id: int) -> Job:
+def _get_job_or_404(db: Session, job_id: str) -> Job:
     job = db.query(Job).filter(Job.id == job_id).first()
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -157,7 +170,7 @@ async def upload_file(
 
 
 @app.get("/files/{job_id}/status", response_model=JobStatusResponse)
-def job_status(job_id: int, db: Session = Depends(get_db)) -> JobStatusResponse:
+def job_status(job_id: str, db: Session = Depends(get_db)) -> JobStatusResponse:
     job = _get_job_or_404(db, job_id)
     return JobStatusResponse(
         status=job.status,
@@ -166,7 +179,7 @@ def job_status(job_id: int, db: Session = Depends(get_db)) -> JobStatusResponse:
     )
 
 
-def _delete_job_files(job_id: int, upload_path: Path, output_path: Path) -> None:
+def _delete_job_files(job_id: str, upload_path: Path, output_path: Path) -> None:
     """Background task: delete files and DB record after download completes."""
     upload_path.unlink(missing_ok=True)
     output_path.unlink(missing_ok=True)
@@ -179,7 +192,7 @@ def _delete_job_files(job_id: int, upload_path: Path, output_path: Path) -> None
 
 @app.get("/files/{job_id}/download")
 def download_file(
-    job_id: int,
+    job_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> FileResponse:
@@ -193,19 +206,18 @@ def download_file(
 
     upload_path = settings.upload_dir / job.stored_filename
 
-    # Use the original filename (not the UUID stored name) as the download name.
     stem = Path(job.original_filename).stem
     download_name = f"{stem}.{job.target_format}"
+    content_disposition = _safe_content_disposition(download_name)
 
-    # Schedule file + DB cleanup to run after the response is fully sent.
-    # FileResponse streams directly from disk — no file is loaded into memory.
     background_tasks.add_task(_delete_job_files, job.id, upload_path, output_path)
 
-    return FileResponse(
+    response = FileResponse(
         path=output_path,
-        filename=download_name,
         media_type="application/octet-stream",
     )
+    response.headers["Content-Disposition"] = content_disposition
+    return response
 
 
 @app.get("/health")

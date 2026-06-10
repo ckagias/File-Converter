@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, create_engine, func
+from sqlalchemy import BigInteger, DateTime, String, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import settings
@@ -15,7 +16,7 @@ class Base(DeclarativeBase):
 class Job(Base):
     __tablename__ = "jobs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     original_filename: Mapped[str] = mapped_column(String(256), nullable=False)
     stored_filename: Mapped[str] = mapped_column(String(256), nullable=False)

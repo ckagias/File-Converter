@@ -14,6 +14,16 @@ Background processing via Celery + Redis handles large files without blocking th
 - Three UI themes (Steel, Forest, Ocean)
 - Docker Compose setup — one command to run
 
+## Security
+
+- **Magic byte validation** — file content is checked against known signatures before conversion; a `.pdf` renamed to `.docx` is rejected
+- **Zip Slip protection** — archive member paths are resolved and checked to stay inside the output directory before extraction
+- **ZIP bomb protection** — total uncompressed size is capped at 4 GB across all archive converters
+- **UUID job IDs** — job IDs are random UUIDs, not sequential integers, preventing enumeration of other users' files
+- **NGINX rate limiting** — uploads capped at 3/min, status polling at 30/min, all other API calls at 60/min per IP; returns 429 on excess
+- **Non-root containers** — backend and worker run as `appuser` (uid 1001) with all Linux capabilities dropped except `DAC_OVERRIDE`
+- **Safe Content-Disposition** — download filenames strip control characters and use RFC 5987 encoding for non-ASCII names, preventing HTTP header injection
+
 ## Supported Formats
 
 ### Documents

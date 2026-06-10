@@ -3,6 +3,7 @@ import io
 import logging
 import subprocess
 import tarfile
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -82,6 +83,57 @@ EXT_CATEGORY: dict[str, str] = {
     "mp4": "video", "mkv": "video", "avi": "video", "mov": "video", "webm": "video",
     "zip": "archive", "7z": "archive", "gz": "archive",
 }
+
+
+_ZIP_BOMB_LIMIT = 4 * 1024 * 1024 * 1024  # 4 GB uncompressed
+
+MAGIC_SIGNATURES: dict[str, list[bytes]] = {
+    "pdf":  [b"%PDF"],
+    "jpg":  [b"\xff\xd8\xff"],
+    "jpeg": [b"\xff\xd8\xff"],
+    "png":  [b"\x89PNG\r\n\x1a\n"],
+    "mp3":  [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"],
+    "mp4":  [b"\x00\x00\x00\x18ftyp", b"\x00\x00\x00\x20ftyp",
+             b"\x00\x00\x00\x1cftyp", b"ftyp"],
+    # docx/pptx/xlsx and zip/7z share PK header
+    "docx": [b"PK\x03\x04"],
+    "pptx": [b"PK\x03\x04"],
+    "xlsx": [b"PK\x03\x04"],
+    "zip":  [b"PK\x03\x04"],
+    "7z":   [b"7z\xbc\xaf\x27\x1c"],
+}
+
+
+def _safe_archive_member(name: str, dest_dir: Path) -> Path:
+    """Resolve member path and raise if it escapes dest_dir (Zip Slip guard)."""
+    target = (dest_dir / name).resolve()
+    if not str(target).startswith(str(dest_dir.resolve())):
+        raise ValueError(f"Unsafe archive member: {name!r}")
+    return target
+
+
+def _check_zip_bomb(zf: zipfile.ZipFile) -> None:
+    total = sum(i.file_size for i in zf.infolist())
+    if total > _ZIP_BOMB_LIMIT:
+        raise ValueError(f"ZIP bomb detected: uncompressed size {total} exceeds limit")
+
+
+def _check_7z_bomb(sz: py7zr.SevenZipFile) -> None:
+    total = sum(
+        (info.uncompressed or 0) for info in sz.list() if not info.is_directory
+    )
+    if total > _ZIP_BOMB_LIMIT:
+        raise ValueError(f"ZIP bomb detected: uncompressed size {total} exceeds limit")
+
+
+def validate_magic_bytes(path: Path, ext: str) -> None:
+    """Raise ValueError if the file's magic bytes don't match the declared extension."""
+    sigs = MAGIC_SIGNATURES.get(ext.lower())
+    if not sigs:
+        return
+    header = path.read_bytes()[:32]
+    if not any(header.startswith(s) for s in sigs):
+        raise ValueError(f"File content does not match declared extension .{ext}")
 
 
 def _output_name(stored: str, ext: str) -> str:
@@ -367,8 +419,10 @@ def _repack_zip_to_7z(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, "7z")
         out_path = OUTPUT_DIR / out_name
         with zipfile.ZipFile(str(input_path), "r") as zf:
+            _check_zip_bomb(zf)
             with py7zr.SevenZipFile(str(out_path), "w") as sz:
                 for item in zf.infolist():
+                    _safe_archive_member(item.filename, OUTPUT_DIR)
                     with zf.open(item) as f:
                         sz.writef(f, item.filename)
         return True, out_name
@@ -384,8 +438,10 @@ def _repack_zip_to_targz(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, "tar.gz")
         out_path = OUTPUT_DIR / out_name
         with zipfile.ZipFile(str(input_path), "r") as zf:
+            _check_zip_bomb(zf)
             with tarfile.open(str(out_path), "w:gz") as tf:
                 for item in zf.infolist():
+                    _safe_archive_member(item.filename, OUTPUT_DIR)
                     with zf.open(item) as f:
                         data = f.read()
                         info = tarfile.TarInfo(name=item.filename)
@@ -404,9 +460,11 @@ def _repack_7z_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, "zip")
         out_path = OUTPUT_DIR / out_name
         with py7zr.SevenZipFile(str(input_path), "r") as sz:
+            _check_7z_bomb(sz)
             members = sz.readall()
         with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
             for name, buf in members.items():
+                _safe_archive_member(name, OUTPUT_DIR)
                 zf.writestr(name, buf.read())
         return True, out_name
     except Exception:
@@ -421,9 +479,13 @@ def _repack_targz_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
         out_name = _output_name(stored, "zip")
         out_path = OUTPUT_DIR / out_name
         with tarfile.open(str(input_path), "r:gz") as tf:
+            total = sum(m.size for m in tf.getmembers() if m.isfile())
+            if total > _ZIP_BOMB_LIMIT:
+                raise ValueError(f"ZIP bomb detected: uncompressed size {total} exceeds limit")
             with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
                 for member in tf.getmembers():
                     if member.isfile():
+                        _safe_archive_member(member.name, OUTPUT_DIR)
                         f = tf.extractfile(member)
                         if f:
                             zf.writestr(member.name, f.read())
@@ -445,6 +507,12 @@ def _cleanup(path: Path) -> None:
 def handle_conversion(stored_filename: str, target_format: str) -> tuple[bool, str]:
     src_ext = stored_filename.rsplit(".", 1)[-1].lower() if "." in stored_filename else ""
     tgt = target_format.lower().lstrip(".")
+
+    try:
+        validate_magic_bytes(UPLOAD_DIR / stored_filename, src_ext)
+    except ValueError as exc:
+        logger.warning("Magic byte check failed for %s: %s", stored_filename, exc)
+        return False, ""
 
     if src_ext == "docx":
         return _convert_docx(stored_filename, tgt)
