@@ -13,9 +13,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY app/ ./app/
 
 RUN groupadd --gid 1001 appgroup && \
-    useradd --uid 1001 --gid appgroup --no-create-home appuser && \
+    useradd --uid 1001 --gid appgroup --create-home appuser && \
     mkdir -p /app/uploads /app/outputs && \
-    chown -R appuser:appgroup /app/uploads /app/outputs
+    chown -R appuser:appgroup /app/uploads /app/outputs /home/appuser
 
 USER appuser
 

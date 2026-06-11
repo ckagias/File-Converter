@@ -456,16 +456,21 @@ def _repack_zip_to_targz(stored: str, target_ext: str) -> tuple[bool, str]:
 
 def _repack_7z_to_zip(stored: str, target_ext: str) -> tuple[bool, str]:
     try:
+        import tempfile
         input_path = UPLOAD_DIR / stored
         out_name = _output_name(stored, "zip")
         out_path = OUTPUT_DIR / out_name
-        with py7zr.SevenZipFile(str(input_path), "r") as sz:
-            _check_7z_bomb(sz)
-            members = sz.readall()
-        with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, buf in members.items():
-                _safe_archive_member(name, OUTPUT_DIR)
-                zf.writestr(name, buf.read())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            with py7zr.SevenZipFile(str(input_path), "r") as sz:
+                _check_7z_bomb(sz)
+                sz.extractall(path=tmp_dir)
+            with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
+                for extracted in tmp_path.rglob("*"):
+                    if extracted.is_file():
+                        arcname = extracted.relative_to(tmp_path).as_posix()
+                        _safe_archive_member(arcname, OUTPUT_DIR)
+                        zf.write(extracted, arcname)
         return True, out_name
     except Exception:
         logger.exception("7z->zip failed: %s", stored)
