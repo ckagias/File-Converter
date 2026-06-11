@@ -1,30 +1,53 @@
 # File Converter
 
-A self-hosted, privacy-focused file conversion service. Upload a file, pick a target format, download the result. Files are deleted immediately after download. Νo accounts, no retention.
+A free, open-source file converter you run on your own computer. No uploads to third-party servers, no accounts, no file size restrictions imposed by a website. Your files never leave your machine.
 
-Background processing via Celery + Redis handles large files without blocking the API. Streaming I/O ensures even 2 GB video uploads and downloads never load the full file into memory.
+Upload a file, pick a target format, download the result. Files are deleted immediately after download.
 
 ## Features
 
-- Background file conversion via Celery + Redis
-- Streaming upload and download (peak memory per file is ~1 MB regardless of size)
-- Real upload progress bar via XHR (no frozen UI on large files)
-- Exponential backoff polling (starts at 1s, caps at 15s, generates far fewer requests for long conversions)
-- Strict file size limits per category (images 50 MB, documents 100 MB, audio 200 MB, archives 500 MB, video 2 GB)
-- Automatic cleanup of unconverted and un-downloaded files (Celery Beat, every 30 min)
-- Support for documents, images, audio, video, and archives
-- Three UI themes (Steel, Forest, Ocean)
-- Docker Compose setup (one command to run)
+- Convert documents, images, audio, video, and archives
+- Files are deleted right after you download them, nothing is stored
+- No accounts, no sign-up, no internet connection required after setup
+- Upload progress bar so you know something is happening on large files
+- Three color themes (Steel, Forest, Ocean)
+- Runs entirely on your computer via Docker
 
-## Security
+## Installation
 
-- **Magic byte validation:** file content is checked against known signatures before conversion; a `.pdf` renamed to `.docx` is rejected
-- **Zip Slip protection:** archive member paths are resolved and checked to stay inside the output directory before extraction
-- **ZIP bomb protection:** total uncompressed size is capped at 4 GB across all archive converters
-- **UUID job IDs:** job IDs are random UUIDs, not sequential integers, preventing enumeration of other users' files
-- **NGINX rate limiting:** uploads capped at 3/min, status polling at 30/min, all other API calls at 60/min per IP; returns 429 on excess
-- **Non-root containers:** backend and worker run as `appuser` (uid 1001) with all Linux capabilities dropped except `DAC_OVERRIDE`
-- **Safe Content-Disposition:** download filenames strip control characters and use RFC 5987 encoding for non-ASCII names, preventing HTTP header injection
+**You will need:**
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) free, available for Windows, Mac, and Linux
+- [Git](https://git-scm.com/downloads) to download the project (or download the ZIP directly from GitHub)
+
+**Steps:**
+
+**Mac / Linux**
+```bash
+git clone <repo>
+cd file-converter
+chmod +x start.sh
+./start.sh
+```
+
+**Windows (PowerShell)**
+```powershell
+git clone <repo>
+cd file-converter
+.\start.ps1
+```
+> If PowerShell says the script cannot be run, paste this first and press Enter:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+**Windows (Command Prompt)**
+```bat
+git clone <repo>
+cd file-converter
+start.bat
+```
+
+The first run will take a few minutes while Docker downloads and builds everything. Once it's ready, open **http://localhost:3000** in your browser.
+
+**To stop the app**, run `./stop.sh`, `.\stop.ps1`, or `stop.bat` depending on your platform, or press `Ctrl+C` in the terminal.
 
 ## Supported Formats
 
@@ -79,33 +102,37 @@ Background processing via Celery + Redis handles large files without blocking th
 | 7Z | ZIP |
 | TAR.GZ | ZIP |
 
-## Quickstart
+---
 
-```bash
-git clone <repo>
-cd file-converter
-cp .env.example .env
-# Edit .env — set strong values for POSTGRES_PASSWORD
-docker compose up --build
-```
+## For Developers
 
-Open http://localhost:3000
+Everything below is intended for people who want to contribute to or modify the project.
 
-## Configuration
+### Security
 
-All configuration is through environment variables. Copy `.env.example` to `.env` and edit before starting.
+- **Magic byte validation:** file content is checked against known signatures before conversion; a `.pdf` renamed to `.docx` is rejected
+- **Zip Slip protection:** archive member paths are resolved and checked to stay inside the output directory before extraction
+- **ZIP bomb protection:** total uncompressed size is capped at 4 GB across all archive converters
+- **UUID job IDs:** job IDs are random UUIDs, not sequential integers, preventing enumeration of other users' files
+- **NGINX rate limiting:** uploads capped at 3/min, status polling at 30/min, all other API calls at 60/min per IP; returns 429 on excess
+- **Non-root containers:** backend and worker run as `appuser` (uid 1001) with all Linux capabilities dropped except `DAC_OVERRIDE`
+- **Safe Content-Disposition:** download filenames strip control characters and use RFC 5987 encoding for non-ASCII names, preventing HTTP header injection
+
+### Configuration
+
+All configuration is through environment variables in `.env`. The start scripts create this file automatically. You only need to edit it if you are exposing the app beyond localhost.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://file-converter:file-converter@postgres:5432/file-converter` |
 | `REDIS_URL` | Redis connection string used by Celery | `redis://redis:6379/0` |
-| `POSTGRES_USER` | PostgreSQL username (used by the postgres container) | `file-converter` |
+| `POSTGRES_USER` | PostgreSQL username | `file-converter` |
 | `POSTGRES_PASSWORD` | PostgreSQL password | `file-converter` |
 | `POSTGRES_DB` | PostgreSQL database name | `file-converter` |
 | `CORS_ORIGINS` | Comma-separated list of allowed CORS origins | `http://localhost:3000` |
 | `MAX_FILE_SIZE_MB` | Fallback file size limit in MB for uncategorised formats | `50` |
 
-## Resource tuning
+### Resource Tuning
 
 The worker container is capped at 6 GB RAM and 3 CPU cores by default, with `--concurrency=2` (two parallel conversions). Adjust in `docker-compose.yml` to match your host:
 
@@ -113,9 +140,7 @@ The worker container is capped at 6 GB RAM and 3 CPU cores by default, with `--c
 - Increase `--concurrency` only if you have enough RAM: `concurrency × 3 GB + 1 GB overhead`.
 - `worker_max_tasks_per_child=10` restarts each worker process every 10 tasks to reclaim memory leaked by LibreOffice and ffmpeg.
 
-## Development
-
-Run each service independently without Docker.
+### Running Without Docker
 
 **Prerequisites:** Python 3.12+, Node 20+, a running Redis instance, a running PostgreSQL instance.
 
@@ -150,7 +175,7 @@ npm run dev
 
 The API runs at http://localhost:8000 and the frontend dev server at http://localhost:5173.
 
-## Project Structure
+### Project Structure
 
 ```
 file-converter/
@@ -172,6 +197,12 @@ file-converter/
 │   ├── nginx.conf
 │   ├── Dockerfile
 │   └── package.json
+├── start.sh               # start script (Mac / Linux)
+├── stop.sh                # stop script (Mac / Linux)
+├── start.ps1              # start script (Windows PowerShell)
+├── stop.ps1               # stop script (Windows PowerShell)
+├── start.bat              # start script (Windows Command Prompt)
+├── stop.bat               # stop script (Windows Command Prompt)
 ├── docker-compose.yml
 └── .env.example
 ```
